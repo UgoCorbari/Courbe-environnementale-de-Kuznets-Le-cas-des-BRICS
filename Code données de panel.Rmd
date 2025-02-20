@@ -1,0 +1,211 @@
+---
+title: "Econométrie des données de Panel"
+author: "CORBARI Ugo"
+date: "2025-01-10"
+output: html_document
+---
+## Importation des données
+
+```{r}
+
+library(plm)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library("readxl")
+library(lmtest)     
+library(stargazer) 
+library(nlme)
+library(corrplot)
+GES <- read_excel("/Users/ugocorbari/Desktop/GES.cap.xlsx")
+PIB <- read_excel("/Users/ugocorbari/Desktop/Pib.cap.BRICS.xlsx")
+```
+
+## Ajustement des formats des bases
+
+```{r}
+
+## Restructurer les données PIB
+PIB.modif <- PIB %>%
+  pivot_longer(
+    cols = -Pays,  
+    names_to = "Year",  
+    values_to = "GDP.cap"  
+  )
+
+PIB.modif <- PIB.modif %>%
+  mutate(
+    Year = as.integer(Year),  
+    GDP.cap = as.numeric(gsub(",", ".", GDP.cap))
+  )
+
+colnames(PIB.modif) <- c("Entity", "Year", "GDP.cap")
+
+PIB.modif <- PIB.modif %>%
+  mutate(
+    Entity = as.character(Entity),  
+    Year = as.integer(Year)  
+  )
+
+GES <- GES %>%
+  mutate(
+    Entity = as.character(Entity),  
+    Year = as.integer(Year)  
+  )
+
+
+# Fusionner les bases PIB et GES
+Data <- PIB.modif %>%
+  left_join(GES, by = c("Entity", "Year")) 
+
+# Exclure l'année 2023 car nos données de populations ne vont que jusqu'en 2022
+Data <- Data %>%
+  filter(Year != 2023)
+
+# Exclure les années entre 1960 et 1987 pour eviter les NA
+Data <- Data %>%
+  filter(!(Year >= 1960 & Year <= 1987))
+
+# Vérifier le résultat
+head(Data)
+
+# Calcul du coefficient de corrélation entre GES.cap et GDP.cap
+correlation_GES_GDP <- cor(Data$GES.cap, Data$GDP.cap, use = "complete.obs", method = "pearson")
+print(correlation_GES_GDP)
+
+
+```
+
+## Statistiques descriptives
+
+```{r}
+
+# Calcul des statistiques descriptives
+stats_descriptives <- Data %>%
+  group_by(Entity) %>%
+  summarise(
+    Minimum_GDP = min(GDP.cap, na.rm = TRUE),
+    Moyenne_GDP = mean(GDP.cap, na.rm = TRUE),
+    Maximum_GDP = max(GDP.cap, na.rm = TRUE),
+    Ecart_Type_GDP = sd(GDP.cap, na.rm = TRUE),
+    
+    Minimum_GES = min(GES.cap, na.rm = TRUE),
+    Moyenne_GES = mean(GES.cap, na.rm = TRUE),
+    Maximum_GES = max(GES.cap, na.rm = TRUE),
+    Ecart_Type_GES = sd(GES.cap, na.rm = TRUE),
+    
+    Minimum_Pop = min(Pop, na.rm = TRUE),
+    Moyenne_Pop = mean(Pop, na.rm = TRUE),
+    Maximum_Pop = max(Pop, na.rm = TRUE),
+    Ecart_Type_Pop = sd(Pop, na.rm = TRUE)
+  ) %>%
+  ungroup() 
+
+# Réorganiser les données pour avoir les statistiques en colonnes
+stats_long <- stats_descriptives %>%
+  pivot_longer(
+    cols = -Entity,
+    names_to = c("Variable", "Statistique"),
+    names_pattern = "(.*)_(.*)"  
+  ) %>%
+  rename(Pays = Entity)  # Renommer Entity en Pays
+
+# Changement du format
+stats_wide <- stats_long %>%
+  pivot_wider(
+    names_from = Statistique,  
+    values_from = value        
+  ) %>%
+  arrange(Pays, Variable)  
+
+# Afficher le tableau final
+print(stats_wide)
+
+
+```
+# Création des modèles 
+
+```{r}
+
+Data$log_GES <- log(Data$GES.cap)
+Data$log_PIB <- log(Data$GDP.cap)
+Data$log_Pop <- log(Data$Pop)
+
+model_MCO <- lm(log_GES ~ log_PIB + I(log_PIB^2) + log_Pop, data = Data)
+
+model_GLS <- gls(log_GES ~ log_PIB + I(log_PIB^2) + log_Pop, 
+                 data = Data, 
+                 method = "REML")
+
+
+# Modèle à Effets Fixes (FE)
+model_FE <- plm(log_GES ~ log_PIB + I(log_PIB^2) + log_Pop, data = Data, model = "within")
+
+# Modèle à Effets Aléatoires (RE)
+model_RE <- plm(log_GES ~ log_PIB + I(log_PIB^2) + log_Pop, data = Data, model = "random")
+
+summary(model_MCO)
+summary(model_GLS)
+summary(model_FE)
+summary(model_RE)
+
+```
+
+## Tests sur les données
+
+```{r}
+
+# Calcul de la matrice de corrélation
+cor_matrix <- cor(Data[, c("log_PIB", "log_GES", "log_Pop")], use = "complete.obs")
+print(cor_matrix)
+# Visualisation avec un corrplot
+corrplot(cor_matrix, method = "color", type = "upper", tl.cex = 0.8, col = colorRampPalette(c("blue", "white", "red"))(200))
+
+```
+
+```{r}
+ggplot(Data, aes(x = log_PIB, y = log_GES)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", formula = y ~ poly(x, 2), col = "red") +
+  labs(title = "Relation entre le PIB et les émissions de GES",
+       x = "log-PIB par habitant",
+       y = "lopg-Émissions de GES") +
+  theme_minimal()
+
+```
+
+## Tests sur les modèles
+```{r}
+# Test de Breusch-Pagan
+bptest(model_MCO)
+bptest(model_RE)
+bptest(model_FE)
+```
+
+## Tbableau final
+
+```{r}
+
+library(texreg)
+
+# Créer un tableau comparatif des résultats des trois modèles
+# Créer un tableau comparatif des résultats des trois modèles
+screenreg(
+  list("MCO" = model_MCO, "Effets Fixes" = model_FE, "Effets Aléatoires" = model_RE, "GLS" = model_GLS),
+  custom.model.names = c("MCO", "Effets Fixes", "Effets Aléatoires", "GLS")
+)
+
+
+# Test de Hausman pour comparer les modèles FE et RE
+hausman_test <- phtest(model_FE, model_RE)
+
+# Afficher le résultat du test de Hausman
+hausman_test
+
+```
+
+
+
+
+```
+
